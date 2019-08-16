@@ -1,0 +1,4 @@
+1.ubunt linux系统使用
+2.sh脚本的运行需要另两个文件,需要放至到同一文件夹,需要给1.sh执行权限,需要切换为当前文件夹
+3.根据自己的需要修改mgr_cnf和mgr.cnf文件,建议使用notepad++保持utf8格式
+4.mgr_cnf的host_ip是你的主机IP,gateway是设计给容器使用的网关
