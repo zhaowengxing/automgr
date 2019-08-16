@@ -58,15 +58,18 @@ done
 }
 
 #初始化replication配置文件,插件安装及账号设置
-_rep_set(){
+_cnf_set(){
 	local i=0
-	local group_seeds=
+	local group_seeds=""
 	local group_mgr_cip=()
 	group_mgr_cip=($(awk '$'${COLUMN_GROUP}' == "'"${arry_cloum[${COLUMN_GROUP}]}"'" \
 				   && $'${COLUMN_APP}' == "'"${APP_NAME_MGR}"'" \
 						{print $'${COLUMN_CONTAINER_IP}'}' mgr_cnf))
 	while [[ i -lt ${#group_mgr_cip[@]} ]]; do
-		group_seeds+=${group_mgr_cip[${i}]}:33061,
+		if [ "${group_seeds}" != "" ] ;then
+			group_seeds=${group_seeds},
+		fi
+		group_seeds+=${group_mgr_cip[${i}]}:33061
 		let i+=1
 	done
 	sed -i '/^server-id/c server-id='${arry_cloum[${COLUMN_CONTAINER_IP}]//./}'' mgr.cnf
@@ -75,6 +78,9 @@ _rep_set(){
 	sed -i '/^loose-group_replication_group_seeds/c loose-group_replication_group_seeds='${group_seeds}'' mgr.cnf
 	cp mgr.cnf ${host_v[2]}
 	chown -R 999:999 ${host_v[2]}/mgr.cnf
+	docker restart ${name} > /dev/null
+}
+_rep_set(){
 	local rpl_str="install plugin group_replication soname 'group_replication.so';\
 					alter user root identified with mysql_native_password by '"${MYSQL_ROOT_PASSWORD}"';\
 					create user ${REP_USER} identified with mysql_native_password by '"${REP_PASSWORD}"';\
@@ -82,8 +88,6 @@ _rep_set(){
 					flush privileges;\
 					change master to master_user='"${REP_USER}"',master_password='"${REP_PASSWORD}"' for channel 'group_replication_recovery';"
 	echo "${rpl_str}" | "${mysql_str[@]}"
-	docker stop ${name} > /dev/null
-	echo ${arry_cloum[${COLUMN_HOST_IP}]}主机上的容器${arry_cloum[${COLUMN_CONTAINER_IP}]},MGR配置成功!
 }
 
 #初始化mysql_volume;mysql容器是依999:999的uid:gid来启动的
@@ -108,6 +112,7 @@ _create_mysql_container(){
 	docker_run=(docker run 	-d --name ${name} \
 				--net ${NET_NAME} \
 				--ip ${arry_cloum[${COLUMN_CONTAINER_IP}]} \
+				--restart=always \
 				-e MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD} \
 				${dockerv} ${REPOSITORY[0]})
 	${docker_run[@]}
@@ -136,6 +141,7 @@ _get_name(){
 
 #检查mgr_cnf文件每行设置;
 line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
+	echo --------------------------------应用"${cnf_line[$line_i]}"配置-----------------------------------------
 	#取到的行数据,cnf_line数组是从[0]开始,[0]是列表名行,不需要循环
 	#取到的每行的列数组arry_cloum也是从[0]开始,为了和awk一致,将[0]用字符占位
 	arry_cloum=('zw' ${cnf_line[$line_i]})
@@ -179,6 +185,7 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 		done
 
 		#判断路由条目是否存在;手工删除格式route del -net 192.168.21.0/27
+		
 		j=0
 		while [[ j -lt ${#df_host[@]} ]];do
 			arry=$(awk '$'${COLUMN_GROUP}' == "'"${arry_cloum[${COLUMN_GROUP}]}"'" \
@@ -189,7 +196,8 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 			
 			return_awk=($(route | awk '$2 == "'"${df_host[${j}]}"'" {print $0}'))
 			if [ "${return_awk}" == "" ]; then
-				# 路由不存在,创建路由规则
+				# 路由不存在,创建路由规则;需要修改/etc/sysctl.conf文件,否则路由通了也不能通讯
+				sed -i '/ip_forward/c ip_forward = 1' /etc/sysctl.conf
 				route add -net ${arry[0]}.${arry[1]}.${arry[2]}.$((${arry[3]}-1))/${MASK} \
 				gw ${df_host[${j}]}
 				if [ "$?" == 0 ];then
@@ -223,7 +231,6 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 					else
 						#容器已存在,并在运行状态
 						echo ${name}容器已存在,并在运行状态
-						
 					fi
 				else
 				#容器不存在
@@ -233,44 +240,66 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 						if ( _initial_mysql_volume ) ;then
 							_create_mysql_container
 							_rep_set
+							_cnf_set
+							
 						fi
 					else
-					#主机volume文件夹存在
+					#主机volume文件夹存在;
 						echo ${arry_cloum[${COLUMN_HOST_IP}]}主机上,已存在/${name}的数据文件夹,请选择你需要的操作:
 						echo 1 跳过本行设置
 						echo 2 保留数据,重建容器
-						echo 3 保留数据,重建容器,并修改配置文件
+						echo 3 保留数据,重建容器,修改配置
 						echo 4 清空数据,重建容器
 						read answer
 						case ${answer} in
-							1) continue ;;
+							1)  ;;
 							2) _create_mysql_container ;;
-							3) _create_mysql_container;_rep_set ;;
+							3) _create_mysql_container;_cnf_set ;;
 							4) rm /${name} -r
 								_initial_mysql_volume
 								_create_mysql_container
-								_rep_set ;;
+								_rep_set
+								_cnf_set
+								 ;;
 						esac
 					fi
-					# datasize=($(du -sh /${name} 2> dev/null))
-					# echo 你的数据库文件夹总容量为:;是否需要从其他容器,拷贝数据文件?
-					# read answer
-					# case ${answer} in
-						# y) echo ;;
-						# n) ;;
-					# esac
+					
+					#是否拷贝数据;
+					datasize=($(du -sh /${name}))
+					echo "${arry_cloum[${COLUMN_HOST_IP}]}主机上,容器/${name}的数据文件夹总容量为:${datasize[0]},是否需要从其他容器,拷贝数据文件[y/n]?"
+					read answer
+					case ${answer} in
+						#
+						y) echo 请输入文件复制命令:
+							read answer_cmd;${answer_cmd};rm ${host_v[0]}/auto.cnf;_rep_set;_cnf_set
+							;;
+						n) ;;
+					esac
+					
+					#是否引导集群;加入集群
+					echo ${arry_cloum[${COLUMN_GROUP}]}集群的${name}容器,数据已成功配置,请选择你需要的操作:
+					echo 1 跳过本行设置
+					echo 2 加入集群
+					echo 3 引导集群启动
+					read answer
+					case ${answer} in
+						1)  ;;
+						2)  ;;
+						3) 	mgr_boot="set global group_replication_bootstrap_group=on;\
+										start group_replication;\
+										set global group_replication_bootstrap_group=off;"
+							echo "${mgr_boot}" | "${mysql_str[@]}"
+							;;
+					esac
 				fi
 				
-				
-				
-				
-				esac
+
 				;;
 			${APP_NAME_PXY})
-				echo proxysql
+				# echo proxysql
 				;;
 			${APP_NAME_KEEP})
-				echo keepalived
+				# echo keepalived
 				;;
 		esac
 	fi
