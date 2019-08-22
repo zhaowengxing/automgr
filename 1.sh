@@ -1,7 +1,14 @@
 #!/bin/bash
 set -eo pipefail
-shopt -s nullglob
+#shopt -s nullglob 导致*字符不能输出
 
+#常量REPOSITORY数组的顺序,后面有列位置调用,不要改动列顺序
+#编码时VOLUME前都加上了/$name,常量这里不要加;后面有列位置调用,不要改动列顺序
+#group需要是两位字符,否则需要修改cnf生成代码
+#awk和$@的顺序,从$1开始;数组从[0]开始
+#默认网关-1=子网段,如果需要需要重设网关IP,需要修改网段生成代码
+#为了root用户可以SSH登录,需要修改/etc/ssh/sshd_config中的PermitRootLogin为yes
+#echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
 REPOSITORY=(mysql proxysql/proxysql osixia/keepalived)
 NET_NAME=mgr_net;MASK=27
 COLUMN_HOST_IP=1;COLUMN_GATEWAY=2;COLUMN_CONTAINER_IP=3;COLUMN_APP=4;COLUMN_GROUP=5
@@ -9,11 +16,6 @@ APP_NAME_MGR=mysql;APP_NAME_PXY=proxysql;APP_NAME_KEEP=keepalived
 MGR_VOLUME=(/mysql:/var/lib/mysql /mysqld:/var/run/mysqld /conf.d:/etc/mysql/conf.d)
 REP_USER=rep;REP_PASSWORD=rep123456
 MYSQL_ROOT_PASSWORD=root123456
-#常量REPOSITORY数组的顺序,后面有列位置调用,不要改动列顺序
-#编码时VOLUME前都加上了/$name,常量这里不要加;后面有列位置调用,不要改动列顺序
-#group需要是两位数字,否则需要修改cnf生成代码
-#awk和$@的顺序,从$1开始;数组从[0]开始
-#默认网关-1=子网段,如果需要需要重设网关IP,需要修改网段生成代码
 
 
 #判断docker 管理程序是否安装
@@ -46,6 +48,12 @@ IFS=$'\n'
 cnf_line=($(awk '{print $0}' mgr_cnf))
 IFS="$OLD_IFS"
 
+#获取容器名称函数;group app container_ip
+_get_name(){
+	local arry=(${arry_cloum[${COLUMN_CONTAINER_IP}]//./ })
+	name="${arry_cloum[${COLUMN_APP}]}"_"${arry_cloum[${COLUMN_GROUP}]}"_${arry[3]}
+}
+
 #获取volume对应数组
 _get_volume(){
 local i=0
@@ -57,7 +65,21 @@ while [[ i -lt ${#volume[@]} ]]; do
 done
 }
 
-#初始化replication配置文件,插件安装及账号设置
+#MGR插件安装及账号设置
+_rep_set(){
+	local rpl_str="install plugin group_replication soname 'group_replication.so';\
+					alter user root identified with mysql_native_password by '"${MYSQL_ROOT_PASSWORD}"';\
+					create user ${REP_USER} identified with mysql_native_password by '"${REP_PASSWORD}"';\
+					grant replication slave on *.* to ${REP_USER};\
+					flush privileges;\
+					change master to master_user='"${REP_USER}"',master_password='"${REP_PASSWORD}"' for channel 'group_replication_recovery';"
+	echo "${rpl_str}" | "${mysql_str[@]}" &>/dev/null
+}
+
+
+
+
+#初始化replication配置文件
 _cnf_set(){
 	local i=0
 	local group_seeds=""
@@ -80,15 +102,7 @@ _cnf_set(){
 	chown -R 999:999 ${host_v[2]}/mgr.cnf
 	docker restart ${name} > /dev/null
 }
-_rep_set(){
-	local rpl_str="install plugin group_replication soname 'group_replication.so';\
-					alter user root identified with mysql_native_password by '"${MYSQL_ROOT_PASSWORD}"';\
-					create user ${REP_USER} identified with mysql_native_password by '"${REP_PASSWORD}"';\
-					grant replication slave on *.* to ${REP_USER};\
-					flush privileges;\
-					change master to master_user='"${REP_USER}"',master_password='"${REP_PASSWORD}"' for channel 'group_replication_recovery';"
-	echo "${rpl_str}" | "${mysql_str[@]}"
-}
+
 
 #初始化mysql_volume;mysql容器是依999:999的uid:gid来启动的
 _initial_mysql_volume(){
@@ -99,7 +113,6 @@ _initial_mysql_volume(){
 		let i+=1
 	done
 }
-
 
 
 # 创建容器;
@@ -118,9 +131,9 @@ _create_mysql_container(){
 	${docker_run[@]}
 	
 	#判断mysqld容器启动成功
-	mysql_str=( mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h ${arry_cloum[${COLUMN_CONTAINER_IP}]}  )
+
 	for i in {6..0}; do
-		if echo 'select 1' | "${mysql_str[@]}" &> /dev/null; then
+		if echo 'select 1' | "${mysql_str[@]}" &>/dev/null; then
 			break
 		fi
 		echo ${arry_cloum[${COLUMN_HOST_IP}]}主机上的容器${arry_cloum[${COLUMN_CONTAINER_IP}]}正在启动mysqld服务!
@@ -132,51 +145,44 @@ _create_mysql_container(){
 	fi
 }
 
-#获取容器名称函数;group app container_ip
-_get_name(){
-	local arry=(${arry_cloum[${COLUMN_CONTAINER_IP}]//./ })
-	name="${arry_cloum[${COLUMN_APP}]}"_"${arry_cloum[${COLUMN_GROUP}]}"_${arry[3]}
-}
 
+echo 本次运行脚本主要目的:
+echo 1 修改mysql配置文件
+echo 2 拷贝数据
+echo 3 引导集群启动
+read main_cmd
 
 #检查mgr_cnf文件每行设置;
 line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
-	echo --------------------------------应用"${cnf_line[$line_i]}"配置-----------------------------------------
-	#取到的行数据,cnf_line数组是从[0]开始,[0]是列表名行,不需要循环
+#取到的行数据,cnf_line数组是从[0]开始,[0]是列表名行,不需要循环
+
 	#取到的每行的列数组arry_cloum也是从[0]开始,为了和awk一致,将[0]用字符占位
 	arry_cloum=('zw' ${cnf_line[$line_i]})
+	echo ------应用"${arry_cloum[${COLUMN_CONTAINER_IP}]}"配置------
 	
-	#判断host_ip是否本机
+
 	return_awk=$(ifconfig | awk '/'${arry_cloum[${COLUMN_HOST_IP}]}'/{print $0}')
 	if [ "${return_awk}" != "" ]; then 
-		#找到IP,是本机
+	#判断host_ip,是本机
 
-		#判断docker network "${NET_NAME}"是否存在
 		return_awk=$(docker network ls |awk '$2 == "'"${NET_NAME}"'"{print $0}')
-		if [ "${return_awk}" != "" ]; then
-			echo docker network "${NET_NAME}"已存在.
-		else
+		if [ "${return_awk}" == "" ]; then
+		#判断docker network "${NET_NAME}"是否存在
+		
 			arry_local_ip=(${arry_cloum[${COLUMN_GATEWAY}]//./ })
 			docker network create --subnet=${arry_local_ip[0]}.${arry_local_ip[1]}.${arry_local_ip[2]}.$((${arry_local_ip[3]}-1))/${MASK} \
 			--gateway ${arry_cloum[${COLUMN_GATEWAY}]} ${NET_NAME}
-			if [ $? == 0 ];then
-				echo docker network "${NET_NAME}"创建成功.
-			else
-				echo docker network "${NET_NAME}"创建失败!
-				exit 1
-			fi
 		fi
 
 		#找到同一group组的主机IP,创建路由,保证同组,在不同主机的容器通讯
 		group_host=($(awk '$'${COLUMN_GROUP}' == "'"${arry_cloum[${COLUMN_GROUP}]}"'"{print $'${COLUMN_HOST_IP}'}' mgr_cnf))
 		j=0;k=0;df_host=()
 		while [[ j -lt ${#group_host[@]} ]];do
-			#找到同组IP
 			if [ ${group_host[${j}]} != ${arry_cloum[${COLUMN_HOST_IP}]} ];then
-			
-				#df_host数组中没有的,同组IP
+			#找到同组IP
 				return_awk=$(echo "${df_host[@]}" | awk '/'${group_host[${j}]}'/ {print $0}')
 				if [ "${return_awk}" == "" ]; then
+				#df_host数组中没有的,同组IP
 					df_host[${k}]=${group_host[${j}]}
 				fi
 				let k+=1
@@ -185,7 +191,6 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 		done
 
 		#判断路由条目是否存在;手工删除格式route del -net 192.168.21.0/27
-		
 		j=0
 		while [[ j -lt ${#df_host[@]} ]];do
 			arry=$(awk '$'${COLUMN_GROUP}' == "'"${arry_cloum[${COLUMN_GROUP}]}"'" \
@@ -196,7 +201,7 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 			
 			return_awk=($(route | awk '$2 == "'"${df_host[${j}]}"'" {print $0}'))
 			if [ "${return_awk}" == "" ]; then
-				# 路由不存在,创建路由规则;需要修改/etc/sysctl.conf文件,否则路由通了也不能通讯
+			# 路由不存在,创建路由规则;需要修改/etc/sysctl.conf文件,否则创建了路由,也不能通讯
 				sed -i '/ip_forward/c ip_forward = 1' /etc/sysctl.conf
 				route add -net ${arry[0]}.${arry[1]}.${arry[2]}.$((${arry[3]}-1))/${MASK} \
 				gw ${df_host[${j}]}
@@ -204,96 +209,122 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 					echo ${arry_cloum[${COLUMN_GROUP}]}集群的\
 						${arry_cloum[${COLUMN_HOST_IP}]}到${df_host[${j}]}路由规则创建成功!
 				fi
-			else
-				echo ${arry_cloum[${COLUMN_GROUP}]}集群的\
-						${arry_cloum[${COLUMN_HOST_IP}]}到${df_host[${j}]}路由规则已存在!
 			fi	
 			let j+=1
 		done
 		
 		
-		#创建容器的volume文件夹
-		#生成容器配置文件,复制到容器volume文件夹
-		#创建容器
 		
 		#判断本行涉及的APP类型
+		_get_name
 		case ${arry_cloum[${COLUMN_APP}]} in 
+			${APP_NAME_MGR})
 			#mysql容器类型
-			${APP_NAME_MGR})	
-				_get_name
+				_get_volume "${MGR_VOLUME[@]}"
+				mysql_str=( mysql -uroot -p${MYSQL_ROOT_PASSWORD} -h${arry_cloum[${COLUMN_CONTAINER_IP}]} )
 				return_awk=($(docker ps -a | awk '/(.)+'${name}'$/{print $0}'))
 				if [ "${return_awk}" != "" ]; then
 				#容器存在
-				
 					return_awk=($(docker ps -a | awk '/(.)+(Up )+(.)+'${name}'$/{print $0}'))
 					if [ "${return_awk}" = "" ]; then
-						echo "${name}"容器已存在,但是不在运行状态!
+					#不在运行状态
+						if [ "${main_cmd}" == 1 ];then
+							_cnf_set
+							docker start ${name} >/dev/null
+						fi
 					else
-						#容器已存在,并在运行状态
-						echo ${name}容器已存在,并在运行状态
+					#在运行状态
+						if [ "${main_cmd}" == 1 ];then
+							_cnf_set
+							docker restart ${name} >/dev/null
+						fi
 					fi
 				else
 				#容器不存在
-					_get_volume "${MGR_VOLUME[@]}"
+					
 					if [ ! -d /${name} ]; then
 					#主机volume文件夹不存在
-						if ( _initial_mysql_volume ) ;then
-							_create_mysql_container
-							_rep_set
-							_cnf_set
-							
-						fi
+						_initial_mysql_volume
+						_create_mysql_container
+						_rep_set
+						_cnf_set
 					else
 					#主机volume文件夹存在;
 						echo ${arry_cloum[${COLUMN_HOST_IP}]}主机上,已存在/${name}的数据文件夹,请选择你需要的操作:
-						echo 1 跳过本行设置
-						echo 2 保留数据,重建容器
-						echo 3 保留数据,重建容器,修改配置
-						echo 4 清空数据,重建容器
+						echo 1 保留数据,重建容器
+						echo 2 清空数据,重建容器
 						read answer
 						case ${answer} in
-							1)  ;;
-							2) _create_mysql_container ;;
-							3) _create_mysql_container;_cnf_set ;;
-							4) rm /${name} -r
+							1) 	
+								_create_mysql_container
+								_cnf_set
+								;;
+							2) rm /${name} -r
 								_initial_mysql_volume
 								_create_mysql_container
 								_rep_set
 								_cnf_set
-								 ;;
+								;;
 						esac
 					fi
-					
-					#是否拷贝数据;
-					datasize=($(du -sh /${name}))
-					echo "${arry_cloum[${COLUMN_HOST_IP}]}主机上,容器/${name}的数据文件夹总容量为:${datasize[0]},是否需要从其他容器,拷贝数据文件[y/n]?"
-					read answer
-					case ${answer} in
-						#
-						y) echo 请输入文件复制命令:
-							read answer_cmd;${answer_cmd};rm ${host_v[0]}/auto.cnf;_rep_set;_cnf_set
-							;;
-						n) ;;
-					esac
-					
-					#是否引导集群;加入集群
-					echo ${arry_cloum[${COLUMN_GROUP}]}集群的${name}容器,数据已成功配置,请选择你需要的操作:
-					echo 1 跳过本行设置
-					echo 2 加入集群
-					echo 3 引导集群启动
-					read answer
-					case ${answer} in
-						1)  ;;
-						2)  ;;
-						3) 	mgr_boot="set global group_replication_bootstrap_group=on;\
+
+
+					if [ "${main_cmd}" == 2 ];then
+					#复制数据文件;
+						datasize=($(du -sh /${name}))
+						echo "${arry_cloum[${COLUMN_HOST_IP}]}主机上,容器/${name}的数据文件夹总容量为:${datasize[0]},是否需要从其他容器,拷贝数据文件[y/n]?"
+						read answer
+						case ${answer} in
+							y) 	
+								echo 请确认源文件夹不在使用,ssh配置中,已经允许root登录
+								echo 请输入源容器ip:
+								read answer_ip
+								
+								local_name=(${name//_/ })
+								return_awk=$(awk '$'${COLUMN_CONTAINER_IP}' == "'"${answer_ip}"'"{print $'${COLUMN_HOST_IP}'}' mgr_cnf)
+								sourceip=(${answer_ip//./ })
+								sourcename=${local_name[0]}_${local_name[1]}_${sourceip[3]}
+								answer_cmd="scp -r root@${return_awk}:/${sourcename}/* /${name}"
+								if [ "${answer_cmd}" != "" ]; then
+									docker stop ${sourcename} ${name} >/dev/null
+									${answer_cmd}
+									chown -R 999:999 /${name}
+									rm ${host_v[0]}/auto.cnf
+									_cnf_set
+									docker start ${sourcename}  >/dev/null
+								fi
+								;;
+							n) ;;
+						esac
+					fi
+				fi
+				if [ "${main_cmd}" == 3 ];then
+				#引导集群的第一个mysql的MEMBER_ROLE=primary;其他容器start group_replication;对单主的MGR,注意mgr.cnf的顺序
+					find=
+					for i in "${already_bootstrap_group[@]}";do
+						if [ "${i}" == "${arry_cloum[${COLUMN_GROUP}]}" ];then
+							find=yes;break
+						fi
+					done
+					if [ "${find}" != "yes" ] || [ "${already_bootstrap_group[0]}" == "" ];then
+						echo 如果对已存在MEMBER_ROLE=primary的群组进行引导,将导致人为脑裂!
+						echo 请确认${arry_cloum[${COLUMN_GROUP}]}集群中,所有MGR成员的member_state都为offline,再进行引导!
+						echo 1 引导${arry_cloum[${COLUMN_GROUP}]}集群启动
+						echo 2 不引导
+						read answer
+						case ${answer} in
+							1)  mgr_boot="set global group_replication_bootstrap_group=on;\
 										start group_replication;\
 										set global group_replication_bootstrap_group=off;"
-							echo "${mgr_boot}" | "${mysql_str[@]}"
-							;;
-					esac
+								echo "${mgr_boot}" | "${mysql_str[@]}" &>/dev/null
+								;;
+							2) 	;;
+						esac
+						already_bootstrap_group=(${already_bootstrap_group[@]} ${arry_cloum[${COLUMN_GROUP}]})
+					else
+						echo 'start group_replication;' | "${mysql_str[@]}" &>/dev/null
+					fi
 				fi
-				
-
 				;;
 			${APP_NAME_PXY})
 				# echo proxysql
@@ -305,4 +336,4 @@ line_i=1;while [[ line_i -lt ${#cnf_line[@]} ]]; do
 	fi
 	let line_i+=1
 done
-
+echo 脚本运行结束

@@ -1,12 +1,19 @@
 [mysqld]
-; # Group Replication 内部通讯端口 33061
+; Group Replication 内部通讯端口 33061
 binlog_checksum=none
-expire_logs_days=30
+log_error=/var/lib/mysql/error.log
+relay-log=/var/lib/mysql/relay.bin
+binlog_expire_logs_seconds=2592000
 gtid_mode=on
 enforce-gtid-consistency=on
 loose-group_replication_bootstrap_group=off
 loose-group_replication_start_on_boot=on
 group_replication_single_primary_mode=off
+; group_replication_autorejoin_tries=2016
+; 在member_expel_timeout时间内,autorejoin_tries才会尝试连接
+group_replication_member_expel_timeout=0
+group_replication_exit_state_action=READ_ONLY
+
 
 #以下的参数值,脚本会根据mgr_cnf文件自动生成
 server-id=
@@ -18,7 +25,7 @@ loose-group_replication_group_seeds=
 
 
 
-; # 任意主机启动引导集群，完成后关闭引导;其他机器加入集群
+;引导集群启动，完成后关闭引导;其他mysql重启后,自动加入集群
 ; set global group_replication_bootstrap_group=on;
 ; start group_replication;
 ; set global group_replication_bootstrap_group=off;
