@@ -9,7 +9,7 @@
 
 新增机器入群,可以自动冷复制数据文件,超级方便
 
-https://github.com/zhaowengxing/automgr MGR自动维护脚本,欢迎大家测试,指导.
+https://github.com/zhaowengxing/automgr MGR自动维护脚本,欢迎大家测试,QQ:3375887316
 
 当前,MGR功能已经全部可用,proxysql,和keepalived还在更新
 
