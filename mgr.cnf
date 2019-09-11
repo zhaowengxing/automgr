@@ -1,6 +1,7 @@
 [mysqld]
 ; Group Replication 内部通讯端口 33061
 binlog_checksum=none
+max_connections=500
 log_error=/var/lib/mysql/error.log
 relay-log=/var/lib/mysql/relay.bin
 binlog_expire_logs_seconds=2592000

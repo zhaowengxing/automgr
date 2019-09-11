@@ -29,10 +29,15 @@ else
 	echo docker.io服务程序已安装.
 fi
 
-#判断mysql-client-5.7程序是否安装
+#判断mysql-client程序是否安装
 if ! command -v mysql > /dev/null;then
 	echo mysql-client没有安装,现在开始安装....
-	apt install -y --no-install-recommends mysql-client-5.7
+	export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
+	wget /tmp/http://mirrors.ustc.edu.cn/mysql-repo/mysql-apt-config_0.8.13-1_all.deb
+	dpkg -i /tmp/mysql-apt-config_0.8.13-1_all.deb
+	sed -i 's/http\:\/\/repo\.mysql\.com/http\:\/\/mirrors\.ustc\.edu\.cn\/mysql-repo/g' /etc/apt/sources.list.d/mysql.list
+	apt update
+	apt install -y --no-install-recommends mysql-client
 fi
 
 #下载需要的docker image
@@ -157,9 +162,9 @@ _create_mysql_container(){
 
 
 echo '本次运行脚本主要目的:[1/2/3]?'
-echo 1 修改mysql配置文件;存在的容器修改,不存在的创建
-echo 2 复制数据;创建不存在的容器时,提示数据复制
-echo 3 引导集群启动;
+echo 1 修改mysql配置文件,存在的容器修改,不存在的创建
+echo 2 复制数据,创建不存在的容器时,提示数据复制
+echo 3 引导集群启动
 read main_cmd
 
 #检查mgr_cnf文件每行设置;
@@ -170,8 +175,7 @@ line_i=1;while [ ${line_i} -lt ${#cnf_line[@]} ]; do
 	arry_cloum=('zw' ${cnf_line[$line_i]})
 	echo ------应用"${arry_cloum[${COLUMN_CONTAINER_IP}]}"配置------
 	
-
-	return_awk=$(ifconfig | awk '/'${arry_cloum[${COLUMN_HOST_IP}]}'/{print $0}')
+	return_awk=$(ip address show | awk '/'${arry_cloum[${COLUMN_HOST_IP}]}'/{print $0}')
 	if [ "${return_awk}" != "" ]; then 
 	#判断host_ip,是本机
 
@@ -200,7 +204,7 @@ line_i=1;while [ ${line_i} -lt ${#cnf_line[@]} ]; do
 			let j+=1
 		done
 
-		#判断路由条目是否存在;手工删除格式route del -net 192.168.21.0/27
+		#判断路由条目是否存在;手工删除格式ip route del  192.168.21.0/27
 		j=0
 		while [ ${j} -lt ${#df_host[@]} ];do
 			arry=$(awk '$'${COLUMN_GROUP}' == "'"${arry_cloum[${COLUMN_GROUP}]}"'" \
@@ -209,13 +213,13 @@ line_i=1;while [ ${line_i} -lt ${#cnf_line[@]} ]; do
 			arry=(${arry[0]//./ })
 			#返回的同组,同一df_host的网关有多个重复值,只需要一个来生成网段
 			
-			return_awk=($(route | awk '$2 == "'"${df_host[${j}]}"'" {print $0}'))
+			return_awk=($(ip route show | awk '/'${df_host[${j}]}'/ {print $0}'))
 			if [ "${return_awk}" == "" ]; then
 			# 路由不存在,创建路由规则;需要修改/etc/sysctl.conf文件,否则创建了路由,也不能通讯
 			# 重启后依然有效,需要修改/etc/sysconfig/static-routes
 				sed -i '/net\.ipv4\.ip_forward/c net.ipv4.ip_forward = 1' /etc/sysctl.conf
-				route_str="${arry[0]}.${arry[1]}.${arry[2]}.$((${arry[3]}-1))/${MASK} gw ${df_host[${j}]}"
-				route add -net ${route_str}
+				route_str="${arry[0]}.${arry[1]}.${arry[2]}.$((${arry[3]}-1))/${MASK} via ${df_host[${j}]}"
+				ip route add  ${route_str}
 				if [ ! -e /etc/sysconfig/static-routes ]; then
 					mkdir -p /etc/sysconfig
 					echo "any net ""${route_str}" > /etc/sysconfig/static-routes
